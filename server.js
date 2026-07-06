@@ -26,7 +26,6 @@ app.get("/api/health", (req, res) => {
 
 // API login/register/user của bạn đặt ở đây
 
-const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
