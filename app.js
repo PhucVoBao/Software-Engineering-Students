@@ -1,4 +1,6 @@
 const STORAGE_KEY = "seCareerCompassState";
+const BACKEND_TOKEN_KEY = "seCareerCompassApiToken";
+const API_BASE = "";
 
 const roles = {
   "Cloud Architect": {
@@ -314,15 +316,15 @@ const traceabilityItems = [
   trace("FR5.1", "Link GitHub and sync public repos", "GitHub username sync with public API fallback", "Implemented"),
   trace("FR5.2", "Summarize README objectives and stacks", "README keyword summarizer and stack detector", "Prototype"),
   trace("FR5.3", "Generate shareable e-portfolio URL", "Portfolio URL generator and copy action", "Implemented"),
-  trace("FR6.1", "Email/password and Google OAuth", "Simulated sign-in flows", "Prototype"),
-  trace("FR6.2", "Persistent chat, assessment, progress DB", "LocalStorage persistence layer", "Implemented")
+  trace("FR6.1", "Email/password and Google OAuth", "Node.js auth API and simulated Google OAuth chooser", "Implemented"),
+  trace("FR6.2", "Persistent chat, assessment, progress DB", "Node.js JSON database with local cache fallback", "Implemented")
 ];
 
 const nfrItems = [
   ["Usability", "Students can reach all main workflows from the sidebar; desktop and mobile layouts were checked."],
-  ["Performance", "Static SPA with local data; chart and roadmap update instantly for classroom demo scale."],
-  ["Reliability", "State is saved in localStorage and restored after refresh."],
-  ["Security", "Real deployment should replace simulated auth with backend JWT and Google OAuth 2.0."],
+  ["Performance", "Static SPA backed by lightweight JSON APIs; chart and roadmap update instantly for classroom demo scale."],
+  ["Reliability", "State is saved through backend APIs with localStorage cache fallback for offline classroom demo use."],
+  ["Security", "Password login uses backend hashing and session tokens; production deployment should replace local JSON storage with a managed database and real Google OAuth 2.0."],
   ["Scalability", "Data structures separate role, skill node, portfolio, and market trend entities for backend migration."],
   ["Maintainability", "Feature rendering functions are grouped by module in app.js."]
 ];
@@ -346,6 +348,14 @@ const entityModel = [
   ["Job Trend", "Aggregated keyword frequency and growth signal from simulated job portals."],
   ["Mentor Session", "Counselor or industry mentor advising item with topic, owner, status, and notes."]
 ];
+
+const DEMO_ACCOUNT = {
+  id: "acct-demo-student",
+  name: "AnNDH2",
+  email: "anndh2@fpt.edu.vn",
+  role: "Student",
+  salt: "demo-student-salt"
+};
 
 let state = loadState();
 
@@ -380,10 +390,23 @@ function loadState() {
     github: "",
     portfolio: defaultPortfolio,
     user: {
+      id: DEMO_ACCOUNT.id,
+      name: DEMO_ACCOUNT.name,
       email: "anndh2@fpt.edu.vn",
+      role: "Student",
       authProvider: "Email/Password",
-      lastLogin: new Date().toLocaleString()
+      lastLogin: "",
+      signedIn: false,
+      remember: false
     },
+    accounts: defaultAccounts(),
+    loginEvents: [
+      {
+        type: "Session restored",
+        detail: "Default demo account loaded",
+        time: new Date().toLocaleString()
+      }
+    ],
     lastScan: new Date().toLocaleString(),
     tasks: defaultTasks,
     notifications: defaultNotifications,
@@ -395,14 +418,441 @@ function loadState() {
 
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    return { ...fallback, ...saved };
+    return normalizeState({ ...fallback, ...saved });
   } catch {
-    return fallback;
+    return normalizeState(fallback);
   }
+}
+
+function normalizeState(raw) {
+  const normalized = { ...raw };
+  const seeded = defaultAccounts();
+  const accounts = Array.isArray(normalized.accounts) ? normalized.accounts : [];
+  normalized.accounts = [...accounts]
+    .filter((account) => account && account.email)
+    .map((account) => {
+      const provider = account.provider || account.authProvider || "Email/Password";
+      const passwordManaged = Boolean(account.passwordManaged);
+      const passwordSalt = account.passwordSalt || account.salt || `salt-${accountIdFromEmail(account.email)}`;
+      const passwordHash =
+        account.passwordHash || (provider === "Google OAuth 2.0" || passwordManaged ? "" : hashPassword("careercompass", passwordSalt));
+      return {
+        id: account.id || accountIdFromEmail(account.email),
+        name: account.name || displayNameFromEmail(account.email),
+        email: normalizeEmail(account.email),
+        role: account.role || "Student",
+        provider,
+        passwordSalt,
+        passwordHash,
+        createdAt: account.createdAt || "Migrated local record",
+        lastLogin: account.lastLogin || "",
+        status: account.status || "Active",
+        twoFactor: Boolean(account.twoFactor),
+        passwordManaged
+      };
+    });
+
+  if (!normalized.accounts.some((account) => normalizeEmail(account.email) === DEMO_ACCOUNT.email)) {
+    normalized.accounts.unshift(seeded[0]);
+  }
+
+  const savedUser = normalized.user || {};
+  const current =
+    normalized.accounts.find((account) => account.id === savedUser.id) ||
+    normalized.accounts.find((account) => normalizeEmail(account.email) === normalizeEmail(savedUser.email)) ||
+    normalized.accounts[0] ||
+    seeded[0];
+
+  normalized.user = {
+    id: current.id,
+    name: savedUser.name || current.name,
+    email: current.email,
+    role: savedUser.role || current.role,
+    authProvider: savedUser.authProvider || current.provider,
+    lastLogin: savedUser.lastLogin || current.lastLogin || new Date().toLocaleString(),
+    signedIn: Boolean(savedUser.signedIn),
+    remember: Boolean(savedUser.remember)
+  };
+
+  normalized.loginEvents = Array.isArray(normalized.loginEvents) ? normalized.loginEvents.slice(0, 8) : [];
+  normalized.skills = Array.isArray(normalized.skills) ? normalized.skills : [];
+  normalized.completed = normalized.completed && typeof normalized.completed === "object" ? normalized.completed : {};
+  normalized.chat = normalizeChatMessages(normalized.chat).length ? normalizeChatMessages(normalized.chat) : fallbackChat();
+  normalized.portfolio = normalizePortfolioProjects(normalized.portfolio);
+  normalized.sessions = Array.isArray(normalized.sessions) ? normalized.sessions : sessions;
+  normalized.bookmarks = Array.isArray(normalized.bookmarks) ? normalized.bookmarks : [];
+  normalized.backendRecords = Array.isArray(normalized.backendRecords) ? normalized.backendRecords : [];
+  return normalized;
+}
+
+function fallbackChat() {
+  return [{ from: "mentor", text: advisorWelcomeMessage() }];
+}
+
+function defaultAccounts() {
+  return [
+    {
+      id: DEMO_ACCOUNT.id,
+      name: DEMO_ACCOUNT.name,
+      email: DEMO_ACCOUNT.email,
+      role: DEMO_ACCOUNT.role,
+      provider: "Email/Password",
+      passwordSalt: DEMO_ACCOUNT.salt,
+      passwordHash: hashPassword("careercompass", DEMO_ACCOUNT.salt),
+      createdAt: "Seeded demo account",
+      lastLogin: new Date().toLocaleString(),
+      status: "Active",
+      twoFactor: false
+    }
+  ];
+}
+
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function accountIdFromEmail(email) {
+  const slug = normalizeEmail(email).replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+  return `acct-${slug || "local-user"}`;
+}
+
+function displayNameFromEmail(email) {
+  const [name] = normalizeEmail(email).split("@");
+  return name ? name.replace(/[._-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()) : "Student";
+}
+
+function initials(name) {
+  const parts = String(name || "Student")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2);
+  if (parts.length === 1 && parts[0].length > 1) {
+    return parts[0].slice(0, 2).toUpperCase();
+  }
+  return (parts.map((part) => part[0]).join("") || "ST").toUpperCase();
+}
+
+function hashPassword(password, salt) {
+  const source = `${salt}:${password}`;
+  let hash = 2166136261;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function findAccountByEmail(email) {
+  const target = normalizeEmail(email);
+  return (state.accounts || []).find((account) => normalizeEmail(account.email) === target);
+}
+
+function currentAccount() {
+  return (
+    (state.accounts || []).find((account) => account.id === state.user.id) ||
+    findAccountByEmail(state.user.email) ||
+    (state.accounts || [])[0]
+  );
+}
+
+function makeAccount({ name, email, password, role, provider }) {
+  const normalizedEmail = normalizeEmail(email);
+  const salt = `salt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return {
+    id: accountIdFromEmail(normalizedEmail),
+    name: name.trim() || displayNameFromEmail(normalizedEmail),
+    email: normalizedEmail,
+    role: role || "Student",
+    provider: provider || "Email/Password",
+    passwordSalt: salt,
+    passwordHash: password ? hashPassword(password, salt) : "",
+    createdAt: new Date().toLocaleString(),
+    lastLogin: "",
+    status: "Active",
+    twoFactor: false
+  };
+}
+
+function signInAccount(account, provider, remember) {
+  const loginTime = new Date().toLocaleString();
+  account.lastLogin = loginTime;
+  account.provider = provider;
+  state.user = {
+    id: account.id,
+    name: account.name,
+    email: account.email,
+    role: account.role,
+    authProvider: provider,
+    lastLogin: loginTime,
+    signedIn: true,
+    remember: Boolean(remember)
+  };
+  addLoginEvent(provider, `${account.email} signed in`);
+}
+
+function addLoginEvent(type, detail) {
+  state.loginEvents = [
+    {
+      type,
+      detail,
+      time: new Date().toLocaleString()
+    },
+    ...(state.loginEvents || [])
+  ].slice(0, 8);
+}
+
+function passwordStrength(password) {
+  const checks = [
+    password.length >= 8,
+    /[a-z]/.test(password) && /[A-Z]/.test(password),
+    /\d/.test(password),
+    /[^A-Za-z0-9]/.test(password),
+    password.length >= 12
+  ];
+  const score = checks.filter(Boolean).length;
+  const label = score >= 5 ? "Strong" : score >= 3 ? "Good" : score >= 1 ? "Weak" : "Waiting";
+  return { score, label, percent: Math.min(100, score * 20) };
 }
 
 function saveState() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+function apiToken() {
+  return localStorage.getItem(BACKEND_TOKEN_KEY) || "";
+}
+
+async function apiRequest(path, options = {}) {
+  const headers = {
+    Accept: "application/json",
+    ...(options.headers || {})
+  };
+  let body = options.body;
+  if (body !== undefined && !(body instanceof FormData)) {
+    headers["Content-Type"] = "application/json";
+    body = JSON.stringify(body);
+  }
+  const token = apiToken();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  let response;
+  try {
+    response = await fetch(`${API_BASE}/api${path}`, {
+      ...options,
+      headers,
+      body
+    });
+  } catch (error) {
+    throw Object.assign(new Error("Backend API is not reachable."), { offline: true, cause: error });
+  }
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw Object.assign(new Error(payload.message || "Backend request failed."), {
+      status: response.status,
+      payload
+    });
+  }
+  return payload;
+}
+
+async function apiOptional(path, options = {}) {
+  if (!apiToken() && path.startsWith("/me/")) return null;
+  try {
+    const payload = await apiRequest(path, options);
+    state.backendSyncedAt = new Date().toLocaleString();
+    return payload;
+  } catch (error) {
+    if (error.status === 401) {
+      localStorage.removeItem(BACKEND_TOKEN_KEY);
+    }
+    return null;
+  }
+}
+
+function accountFromBackendUser(user) {
+  return {
+    id: user.id || accountIdFromEmail(user.email),
+    name: user.name || displayNameFromEmail(user.email),
+    email: normalizeEmail(user.email),
+    role: user.role || "Student",
+    provider: user.provider || "Email/Password",
+    passwordSalt: "",
+    passwordHash: "",
+    passwordManaged: true,
+    createdAt: user.createdAt || "Backend account",
+    lastLogin: user.lastLogin || "",
+    status: user.status || "Active",
+    twoFactor: false
+  };
+}
+
+function upsertAccountFromBackend(user) {
+  if (!user || !user.email) return null;
+  const account = accountFromBackendUser(user);
+  const index = (state.accounts || []).findIndex((item) => normalizeEmail(item.email) === account.email);
+  if (index >= 0) {
+    state.accounts[index] = { ...state.accounts[index], ...account };
+  } else {
+    state.accounts = [account, ...(state.accounts || [])];
+  }
+  return account;
+}
+
+function applyBackendUser(user) {
+  const account = upsertAccountFromBackend(user);
+  if (!account) return;
+  state.user = {
+    ...state.user,
+    id: account.id,
+    name: account.name,
+    email: account.email,
+    role: account.role,
+    authProvider: account.provider,
+    lastLogin: account.lastLogin || state.user.lastLogin,
+    signedIn: true
+  };
+}
+
+function normalizePortfolioProject(project) {
+  const stack = Array.isArray(project.stack)
+    ? project.stack
+    : Array.isArray(project.techStack)
+      ? project.techStack
+      : [project.language || project.skill || "Portfolio evidence"];
+  return {
+    id: project.id || project.name,
+    name: project.name || "career-portfolio",
+    url: project.url || "#",
+    language: project.language || stack[0] || "Code",
+    summary: project.summary || project.description || "Portfolio evidence aligned with the selected career role.",
+    stack: stack.filter(Boolean)
+  };
+}
+
+function normalizePortfolioProjects(projects) {
+  const normalized = Array.isArray(projects) ? projects.map(normalizePortfolioProject) : [];
+  return normalized.length ? normalized : defaultPortfolio;
+}
+
+function normalizeChatMessages(messages) {
+  return (Array.isArray(messages) ? messages : [])
+    .filter((message) => message && message.from && message.text)
+    .map((message) => ({
+      from: message.from === "user" ? "user" : "mentor",
+      text: String(message.text),
+      createdAt: message.createdAt || new Date().toISOString()
+    }));
+}
+
+async function hydrateFromBackend() {
+  if (!apiToken()) return false;
+  const auth = await apiOptional("/auth/me");
+  if (!auth || !auth.user) return false;
+  applyBackendUser(auth.user);
+
+  const [profileRes, roadmapRes, skillsRes, chatRes, portfolioRes, sessionsRes, recordsRes] = await Promise.all([
+    apiOptional("/me/profile"),
+    apiOptional("/me/roadmap"),
+    apiOptional("/me/skills"),
+    apiOptional("/me/chat"),
+    apiOptional("/me/portfolio"),
+    apiOptional("/me/mentor-sessions"),
+    apiOptional("/me/records")
+  ]);
+
+  const profile = profileRes && profileRes.profile;
+  if (profile) {
+    state.role = roles[profile.targetRole] ? profile.targetRole : state.role;
+    state.github = profile.github || state.github || "";
+    state.transcript.gpa = Number(profile.gpa || state.transcript.gpa || 0);
+    if (Array.isArray(profile.transcriptSignals) && profile.transcriptSignals.length) {
+      state.transcript.signals = profile.transcriptSignals;
+    }
+  }
+  if (roadmapRes && roadmapRes.completedNodes) {
+    state.completed = roadmapRes.completedNodes;
+  }
+  if (skillsRes && Array.isArray(skillsRes.skills)) {
+    state.skills = skillsRes.skills;
+  }
+  if (chatRes && Array.isArray(chatRes.messages) && chatRes.messages.length) {
+    state.chat = normalizeChatMessages(chatRes.messages);
+  }
+  if (portfolioRes) {
+    state.github = portfolioRes.github || state.github || "";
+    state.portfolioShareUrl = portfolioRes.shareUrl || state.portfolioShareUrl;
+    if (Array.isArray(portfolioRes.projects)) {
+      state.portfolio = normalizePortfolioProjects(portfolioRes.projects);
+    }
+  }
+  if (sessionsRes && Array.isArray(sessionsRes.sessions) && sessionsRes.sessions.length) {
+    state.sessions = sessionsRes.sessions.map((session) => ({
+      role: session.role,
+      topic: session.topic,
+      status: session.status,
+      createdAt: session.createdAt
+    }));
+  }
+  if (recordsRes && recordsRes.records) {
+    state.backendRecords = recordsRes.records;
+  }
+
+  saveState();
+  return true;
+}
+
+async function syncProfileToBackend() {
+  return apiOptional("/me/profile", {
+    method: "PUT",
+    body: {
+      fullName: state.user.name,
+      targetRole: state.role,
+      gpa: state.transcript.gpa,
+      github: state.github,
+      transcriptSignals: state.transcript.signals
+    }
+  });
+}
+
+async function syncRoadmapToBackend() {
+  const payload = await apiOptional("/me/roadmap", {
+    method: "PUT",
+    body: {
+      targetRole: state.role,
+      completedNodes: state.completed
+    }
+  });
+  if (payload && payload.completedNodes) {
+    state.completed = payload.completedNodes;
+    state.role = payload.targetRole || state.role;
+    saveState();
+  }
+  return payload;
+}
+
+async function syncSkillsToBackend() {
+  const payload = await apiOptional("/me/skills", {
+    method: "PUT",
+    body: {
+      targetRole: state.role,
+      skills: state.skills
+    }
+  });
+  if (payload && Array.isArray(payload.skills)) {
+    state.skills = payload.skills;
+    saveState();
+  }
+  return payload;
+}
+
+async function syncStudentSnapshot() {
+  saveState();
+  await Promise.all([syncProfileToBackend(), syncRoadmapToBackend(), syncSkillsToBackend()]);
+  saveState();
 }
 
 function currentRole() {
@@ -452,7 +902,9 @@ function priorityRank(priority) {
   return { High: 1, Medium: 2, Low: 3 }[priority] || 4;
 }
 
-function init() {
+async function init() {
+  if (!ensureAppAccess()) return;
+  await hydrateFromBackend();
   setupNavigation();
   setupRoleSelect();
   setupMentor();
@@ -478,6 +930,15 @@ function init() {
   refreshIcons();
 }
 
+function ensureAppAccess() {
+  if (state.user && state.user.signedIn) {
+    return true;
+  }
+  const next = encodeURIComponent(`index.html${window.location.hash || "#view-dashboard"}`);
+  window.location.replace(`login.html?next=${next}`);
+  return false;
+}
+
 function setupNavigation() {
   document.querySelectorAll(".nav-item").forEach((button) => {
     button.addEventListener("click", () => activateSection(button.dataset.section));
@@ -487,9 +948,9 @@ function setupNavigation() {
     button.addEventListener("click", () => activateSection(button.dataset.jump));
   });
 
-  document.getElementById("saveSnapshot").addEventListener("click", () => {
-    saveState();
-    toast("Student snapshot saved to the local database.");
+  document.getElementById("saveSnapshot").addEventListener("click", async () => {
+    await syncStudentSnapshot();
+    toast(apiToken() ? "Student snapshot saved to backend and local cache." : "Student snapshot saved to local cache.");
     renderUsers();
   });
 }
@@ -523,11 +984,13 @@ function setupRoleSelect() {
     .map((role) => `<option value="${escapeHtml(role)}">${escapeHtml(role)}</option>`)
     .join("");
   select.value = state.role;
-  select.addEventListener("change", () => {
+  select.addEventListener("change", async () => {
     state.role = select.value;
     saveState();
     renderAll();
     toast(`Target role changed to ${state.role}.`);
+    await Promise.all([syncProfileToBackend(), syncRoadmapToBackend(), syncSkillsToBackend()]);
+    renderUsers();
   });
 }
 
@@ -559,6 +1022,7 @@ function setupMentor() {
       renderMentorContext();
       renderDashboard();
       toast("Transcript context updated.");
+      syncProfileToBackend();
     };
     reader.onerror = () => {
       state.transcript.signals = [`${file.name}: uploaded for review`];
@@ -574,14 +1038,16 @@ function setupMentor() {
     saveState();
     renderMentorContext();
     renderDashboard();
+    syncProfileToBackend();
   });
 
-  document.getElementById("mentorRefresh").addEventListener("click", () => {
+  document.getElementById("mentorRefresh").addEventListener("click", async () => {
     state.github = document.getElementById("githubInputMentor").value.trim();
     saveState();
     renderMentorContext();
     renderDashboard();
-    toast("Mentor context refreshed.");
+    await syncProfileToBackend();
+    toast(apiToken() ? "Mentor context refreshed and synced." : "Mentor context refreshed.");
   });
 }
 
@@ -593,8 +1059,16 @@ function sendMentorQuestion(rawQuestion) {
   if (input) input.value = "";
   renderChat(true);
 
-  window.setTimeout(() => {
-    state.chat.push({ from: "mentor", text: mentorReply(question) });
+  window.setTimeout(async () => {
+    const payload = await apiOptional("/me/chat", {
+      method: "POST",
+      body: { message: question }
+    });
+    if (payload && Array.isArray(payload.history)) {
+      state.chat = normalizeChatMessages(payload.history);
+    } else {
+      state.chat.push({ from: "mentor", text: mentorReply(question) });
+    }
     saveState();
     renderChat();
     renderUsers();
@@ -844,15 +1318,17 @@ function generalAdvisorReply() {
 }
 
 function setupRoadmapActions() {
-  document.getElementById("resetRoadmap").addEventListener("click", () => {
+  document.getElementById("resetRoadmap").addEventListener("click", async () => {
     currentRole().nodes.forEach((item) => delete state.completed[item.id]);
     saveState();
     renderRoadmap();
     renderDashboard();
     renderGap();
+    await syncRoadmapToBackend();
+    renderUsers();
   });
 
-  document.getElementById("completeFirstPriority").addEventListener("click", () => {
+  document.getElementById("completeFirstPriority").addEventListener("click", async () => {
     const first = currentRole().nodes.find((item) => !state.completed[item.id]);
     if (first) {
       state.completed[first.id] = true;
@@ -861,12 +1337,14 @@ function setupRoadmapActions() {
       renderDashboard();
       renderUsers();
       toast(`${first.title} marked as completed.`);
+      await syncRoadmapToBackend();
+      renderUsers();
     }
   });
 }
 
 function setupGap() {
-  document.getElementById("addSkillForm").addEventListener("submit", (event) => {
+  document.getElementById("addSkillForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     const input = document.getElementById("customSkill");
     const skill = input.value.trim();
@@ -878,6 +1356,8 @@ function setupGap() {
     saveState();
     renderGap();
     renderDashboard();
+    await syncSkillsToBackend();
+    renderUsers();
   });
 
   document.getElementById("exportGapReport").addEventListener("click", exportGapReport);
@@ -885,17 +1365,22 @@ function setupGap() {
 
 function setupMarket() {
   document.getElementById("marketSource").addEventListener("change", renderMarket);
-  document.getElementById("simulateScrape").addEventListener("click", () => {
-    marketData.forEach((item) => {
-      item.LinkedIn += Math.round(Math.random() * 4);
-      item.TopCV += Math.round(Math.random() * 3);
-      item.growth += Math.round(Math.random() * 4 - 1);
-    });
-    state.lastScan = new Date().toLocaleString();
+  document.getElementById("simulateScrape").addEventListener("click", async () => {
+    const scan = await apiOptional("/market/scan", { method: "POST", body: { role: state.role } });
+    if (scan && Array.isArray(scan.trends)) {
+      applyMarketScan(scan);
+    } else {
+      marketData.forEach((item) => {
+        item.LinkedIn += Math.round(Math.random() * 4);
+        item.TopCV += Math.round(Math.random() * 3);
+        item.growth += Math.round(Math.random() * 4 - 1);
+      });
+      state.lastScan = new Date().toLocaleString();
+    }
     saveState();
     renderMarket();
     renderUsers();
-    toast("Daily job portal scan completed.");
+    toast(apiToken() ? "Daily job portal scan completed through backend." : "Daily job portal scan completed.");
   });
   window.addEventListener("resize", () => {
     if (document.getElementById("market").classList.contains("active")) renderMarket();
@@ -939,7 +1424,7 @@ function setupWorkspace() {
     renderWorkspace();
   });
 
-  document.getElementById("createMentorSession").addEventListener("click", () => {
+  document.getElementById("createMentorSession").addEventListener("click", async () => {
     const session = {
       role: "Industry Mentor",
       topic: `${state.role} portfolio review`,
@@ -956,6 +1441,21 @@ function setupWorkspace() {
     renderDashboard();
     renderUsers();
     toast("Mentor session created.");
+    const payload = await apiOptional("/me/mentor-sessions", {
+      method: "POST",
+      body: session
+    });
+    if (payload && payload.session) {
+      state.sessions = payload.sessions.map((item) => ({
+        role: item.role,
+        topic: item.topic,
+        status: item.status,
+        createdAt: item.createdAt
+      }));
+      saveState();
+      renderWorkspace();
+      renderUsers();
+    }
   });
 
   document.getElementById("noteForm").addEventListener("submit", (event) => {
@@ -983,22 +1483,26 @@ function setupSpec() {
 }
 
 function setupUsers() {
-  document.getElementById("loginForm").addEventListener("submit", (event) => {
-    event.preventDefault();
-    state.user.email = document.getElementById("emailInput").value.trim();
-    state.user.authProvider = "Email/Password";
-    state.user.lastLogin = new Date().toLocaleString();
+  document.getElementById("signOutButton").addEventListener("click", async () => {
+    const token = localStorage.getItem(BACKEND_TOKEN_KEY);
+    if (token) {
+      try {
+        await fetch("/api/auth/logout", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        });
+      } catch {
+        // Static-file fallback: local sign-out still works when the backend is not running.
+      }
+    }
+    localStorage.removeItem(BACKEND_TOKEN_KEY);
+    state.user.signedIn = false;
+    state.user.remember = false;
+    addLoginEvent("Sign out", `${state.user.email} signed out`);
     saveState();
-    renderUsers();
-    toast("Signed in with email and password.");
-  });
-
-  document.getElementById("googleLogin").addEventListener("click", () => {
-    state.user.authProvider = "Google OAuth 2.0";
-    state.user.lastLogin = new Date().toLocaleString();
-    saveState();
-    renderUsers();
-    toast("Google OAuth session simulated.");
+    window.location.href = "login.html";
   });
 }
 
@@ -1175,11 +1679,13 @@ function renderRoadmap() {
     .join("");
 
   document.querySelectorAll("[data-node-id]").forEach((checkbox) => {
-    checkbox.addEventListener("change", () => {
+    checkbox.addEventListener("change", async () => {
       state.completed[checkbox.dataset.nodeId] = checkbox.checked;
       saveState();
       renderRoadmap();
       renderDashboard();
+      renderUsers();
+      await syncRoadmapToBackend();
       renderUsers();
     });
   });
@@ -1255,7 +1761,7 @@ function renderSkillPicker() {
     .join("");
 
   document.querySelectorAll("#skillPicker input").forEach((checkbox) => {
-    checkbox.addEventListener("change", () => {
+    checkbox.addEventListener("change", async () => {
       const skill = checkbox.value;
       const next = new Set(state.skills);
       if (checkbox.checked) next.add(skill);
@@ -1267,8 +1773,31 @@ function renderSkillPicker() {
       renderGap();
       renderDashboard();
       renderUsers();
+      await syncSkillsToBackend();
+      renderUsers();
     });
   });
+}
+
+function applyMarketScan(scan) {
+  const bySkill = new Map(marketData.map((item) => [normalize(item.skill), item]));
+  scan.trends.forEach((trend) => {
+    const key = normalize(trend.skill);
+    const item = bySkill.get(key) || {
+      skill: trend.skill,
+      LinkedIn: 0,
+      TopCV: 0,
+      growth: 0
+    };
+    if (trend.source === "TopCV") item.TopCV = trend.frequency;
+    else item.LinkedIn = trend.frequency;
+    item.growth = trend.growth;
+    if (!bySkill.has(key)) {
+      marketData.push(item);
+      bySkill.set(key, item);
+    }
+  });
+  state.lastScan = scan.createdAt ? new Date(scan.createdAt).toLocaleString() : new Date().toLocaleString();
 }
 
 function renderMarket() {
@@ -1394,10 +1923,34 @@ async function syncGitHub(username) {
       })
     );
     state.portfolio = enriched.length ? enriched : defaultPortfolio;
-    toast("GitHub repositories synchronized.");
+    const payload = await apiOptional("/me/portfolio/sync", {
+      method: "POST",
+      body: {
+        github: username,
+        projects: state.portfolio
+      }
+    });
+    if (payload && Array.isArray(payload.projects)) {
+      state.github = payload.github || username;
+      state.portfolioShareUrl = payload.shareUrl || state.portfolioShareUrl;
+      state.portfolio = normalizePortfolioProjects(payload.projects);
+    }
+    await syncProfileToBackend();
+    toast(apiToken() ? "GitHub repositories synchronized and saved to backend." : "GitHub repositories synchronized.");
   } catch {
-    state.portfolio = defaultPortfolio;
-    toast("GitHub sync failed, sample portfolio restored.");
+    const payload = await apiOptional("/me/portfolio/sync", {
+      method: "POST",
+      body: { github: username }
+    });
+    if (payload && Array.isArray(payload.projects)) {
+      state.github = payload.github || username;
+      state.portfolioShareUrl = payload.shareUrl || state.portfolioShareUrl;
+      state.portfolio = normalizePortfolioProjects(payload.projects);
+      toast("Backend portfolio evidence generated.");
+    } else {
+      state.portfolio = defaultPortfolio;
+      toast("GitHub sync failed, sample portfolio restored.");
+    }
   } finally {
     button.disabled = false;
     button.innerHTML = '<i data-lucide="github"></i> Sync repositories';
@@ -1468,7 +2021,7 @@ function renderPortfolio() {
   document.getElementById("githubUsername").value = state.github || "";
   document.getElementById("githubInputMentor").value = state.github || "";
   document.getElementById("portfolioUrl").textContent = portfolioUrl();
-  document.getElementById("portfolioGrid").innerHTML = state.portfolio
+  document.getElementById("portfolioGrid").innerHTML = normalizePortfolioProjects(state.portfolio)
     .map((repo) => `
       <article class="repo-card">
         <h3>${escapeHtml(repo.name)}</h3>
@@ -1483,6 +2036,9 @@ function renderPortfolio() {
 }
 
 function portfolioUrl() {
+  if (state.portfolioShareUrl) {
+    return state.portfolioShareUrl.startsWith("http") ? state.portfolioShareUrl : `https://${state.portfolioShareUrl}`;
+  }
   const handle = state.github || "anndh2";
   return `https://se-career-compass.local/u/${encodeURIComponent(handle)}`;
 }
@@ -1651,15 +2207,26 @@ function renderResources() {
     .join("");
 
   document.querySelectorAll("[data-bookmark]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       const id = button.dataset.bookmark;
       const bookmarks = new Set(state.bookmarks || []);
-      if (bookmarks.has(id)) bookmarks.delete(id);
-      else bookmarks.add(id);
+      const saved = !bookmarks.has(id);
+      if (saved) bookmarks.add(id);
+      else bookmarks.delete(id);
       state.bookmarks = [...bookmarks];
       saveState();
       renderResources();
       renderUsers();
+      const payload = await apiOptional("/me/bookmarks", {
+        method: "POST",
+        body: { resourceId: id, saved }
+      });
+      if (payload && Array.isArray(payload.bookmarks)) {
+        state.bookmarks = payload.bookmarks;
+        saveState();
+        renderResources();
+        renderUsers();
+      }
     });
   });
 }
@@ -1692,18 +2259,37 @@ function renderSpec() {
 }
 
 function renderUsers() {
-  document.getElementById("emailInput").value = state.user.email;
-  document.getElementById("loginStatus").textContent = `${state.user.authProvider} - ${state.user.lastLogin}`;
+  const account = currentAccount() || defaultAccounts()[0];
+  const signedIn = Boolean(state.user.signedIn);
+  const rememberLabel = signedIn ? (state.user.remember ? "Remembered" : "Current tab") : "Signed out";
+  document.getElementById("authSummary").innerHTML = `
+    <i data-lucide="${signedIn ? "shield-check" : "shield-alert"}"></i>
+    <span>${signedIn ? "Signed in" : "Signed out"}</span>
+  `;
+  document.getElementById("sessionBadge").textContent = signedIn ? "Active" : "Signed out";
+  document.getElementById("sessionBadge").classList.toggle("signed-out", !signedIn);
+  document.getElementById("accountAvatarInitials").textContent = initials(account.name);
+  document.getElementById("accountName").textContent = account.name;
+  document.getElementById("accountEmail").textContent = account.email;
+  document.getElementById("accountProvider").textContent = state.user.authProvider || account.provider;
+  document.getElementById("accountRole").textContent = account.role;
+  document.getElementById("accountLastLogin").textContent = account.lastLogin || state.user.lastLogin || "Not recorded";
+  document.getElementById("accountSession").textContent = rememberLabel;
+
   const completion = getCompletion();
   const gap = getGap();
+  const lastEvent = (state.loginEvents || [])[0];
   const records = [
+    ["Active account", `${account.name} - ${account.email}`],
+    ["Auth events", lastEvent ? `${lastEvent.type} at ${lastEvent.time}` : "No auth events recorded"],
     ["Chat history", `${state.chat.length} messages`],
     ["Skill assessment", `${gap.matched.length}/${gap.required.length} matched for ${state.role}`],
     ["Roadmap progress", `${completion.done}/${completion.total} nodes completed`],
     ["GitHub portfolio", `${state.portfolio.length} repositories stored`],
     ["Course bookmarks", `${(state.bookmarks || []).length} resources saved`],
     ["Mentor sessions", `${(state.sessions || []).length} advising sessions`],
-    ["Market pulse", `Last scan ${state.lastScan}`]
+    ["Market pulse", `Last scan ${state.lastScan}`],
+    ["Backend sync", state.backendSyncedAt ? `Last API sync ${state.backendSyncedAt}` : "Local cache waiting for API sync"]
   ];
   document.getElementById("recordList").innerHTML = records
     .map(([label, value]) => `
@@ -1719,6 +2305,37 @@ function renderUsers() {
       <div class="session-row">
         <strong>${escapeHtml(session.role)} <span>${escapeHtml(session.status)}</span></strong>
         <span>${escapeHtml(session.topic)}</span>
+      </div>
+    `)
+    .join("") || `<p class="empty-text">No mentor sessions yet.</p>`;
+
+  const securityItems = [
+    ["Valid email", account.email.includes("@"), account.email],
+    ["Password policy", Boolean(account.passwordHash) || account.passwordManaged || account.provider === "Google OAuth 2.0", "Passwords are stored as hashed credentials; OAuth accounts use provider-managed credentials."],
+    ["Session state", signedIn, rememberLabel],
+    ["Role assigned", Boolean(account.role), account.role],
+    ["OAuth path", (state.accounts || []).some((item) => item.provider === "Google OAuth 2.0") || state.user.authProvider === "Google OAuth 2.0", "Google sign-in is handled through the login page account chooser."]
+  ];
+  document.getElementById("securityChecklist").innerHTML = securityItems
+    .map(([label, done, text]) => `
+      <div class="security-item ${done ? "" : "pending"}">
+        <i>${done ? "OK" : "!"}</i>
+        <div>
+          <strong>${escapeHtml(label)}</strong>
+          <span>${escapeHtml(text)}</span>
+        </div>
+      </div>
+    `)
+    .join("");
+
+  document.getElementById("accountList").innerHTML = (state.accounts || [])
+    .map((item) => `
+      <div class="account-row">
+        <strong>
+          ${escapeHtml(item.name)}
+          <span>${escapeHtml(item.role)}</span>
+        </strong>
+        <span>${escapeHtml(item.email)} - ${escapeHtml(item.provider)} - created ${escapeHtml(item.createdAt)}</span>
       </div>
     `)
     .join("");

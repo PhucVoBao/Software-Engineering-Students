@@ -517,30 +517,48 @@
           <div class="section-heading">
             <div>
               <p class="eyebrow">FR6 User Management</p>
-              <h2>Authentication and persistent records</h2>
+              <h2>Account center and persistent records</h2>
+            </div>
+            <div class="account-badge" id="authSummary">
+              <i data-lucide="shield-check"></i>
+              <span>Local demo session</span>
             </div>
           </div>
 
-          <div class="user-grid">
-            <article class="panel auth-card">
-              <h3>Student login</h3>
-              <form id="loginForm">
-                <label class="field-label" for="emailInput">Email</label>
-                <input id="emailInput" type="email" value="anndh2@fpt.edu.vn" />
-                <label class="field-label" for="passwordInput">Password</label>
-                <input id="passwordInput" type="password" value="careercompass" />
-                <button class="primary-action full" type="submit">
-                  <i data-lucide="log-in"></i>
-                  Sign in
+          <div class="account-layout">
+            <article class="panel account-profile">
+              <div class="profile-hero">
+                <div class="profile-avatar" id="accountAvatarInitials">AN</div>
+                <div>
+                  <p class="eyebrow">Current session</p>
+                  <h3 id="accountName">AnNDH2</h3>
+                  <span id="accountEmail">anndh2@fpt.edu.vn</span>
+                </div>
+              </div>
+              <dl class="account-facts">
+                <div><dt>Provider</dt><dd id="accountProvider">Email/Password</dd></div>
+                <div><dt>Role</dt><dd id="accountRole">Student</dd></div>
+                <div><dt>Last login</dt><dd id="accountLastLogin">Just now</dd></div>
+                <div><dt>Session</dt><dd id="accountSession">Remembered</dd></div>
+              </dl>
+              <div class="inline-actions">
+                <button class="secondary-action" id="signOutButton" type="button">
+                  <i data-lucide="log-out"></i>
+                  Sign out
                 </button>
-              </form>
-              <button class="secondary-action full" id="googleLogin">
-                <i data-lucide="badge-check"></i>
-                Google OAuth 2.0
-              </button>
-              <div class="mini-status" id="loginStatus">Session restored from local database</div>
+              </div>
             </article>
 
+            <article class="panel security-panel">
+              <div class="auth-card-head">
+                <h3>Access checklist</h3>
+                <span class="security-badge" id="sessionBadge">Active</span>
+              </div>
+              <div class="security-list" id="securityChecklist"></div>
+            </article>
+          </div>
+
+          <div class="user-grid account-records">
             <article class="panel">
               <h3>Stored student records</h3>
               <div class="record-list" id="recordList"></div>
@@ -549,6 +567,11 @@
             <article class="panel">
               <h3>Mentor sessions</h3>
               <div class="session-list" id="sessionList"></div>
+            </article>
+
+            <article class="panel">
+              <h3>Known accounts</h3>
+              <div class="account-list" id="accountList"></div>
             </article>
           </div>
         </section>
