@@ -27,9 +27,7 @@ app.get("/api/health", (req, res) => {
 
 // API login/register/user của bạn đặt ở đây
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+// API login/register/user của bạn đặt ở đây
 const DEMO_ACCOUNT = {
   id: "acct-demo-student",
   name: "AnNDH2",
