@@ -14,6 +14,7 @@ const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : pat
 const DB_FILE = process.env.DB_FILE ? path.resolve(process.env.DB_FILE) : path.join(DATA_DIR, "db.json");
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7;
 
+const app = express();
 app.use(cors());
 app.use(express.json());
 
