@@ -3,6 +3,9 @@ const fs = require("fs/promises");
 const http = require("http");
 const path = require("path");
 const { URL } = require("url");
+const express = require("express");
+const cors = require("cors");
+
 
 const HOST = process.env.HOST || (process.env.PORT ? "0.0.0.0" : "127.0.0.1");
 const PORT = Number(process.env.PORT || 3000);
@@ -11,6 +14,22 @@ const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : pat
 const DB_FILE = process.env.DB_FILE ? path.resolve(process.env.DB_FILE) : path.join(DATA_DIR, "db.json");
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7;
 
+app.use(cors());
+app.use(express.json());
+
+app.get("/api/health", (req, res) => {
+  res.json({
+    ok: true,
+    message: "Backend is running on Vercel"
+  });
+});
+
+// API login/register/user của bạn đặt ở đây
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
 const DEMO_ACCOUNT = {
   id: "acct-demo-student",
   name: "AnNDH2",
